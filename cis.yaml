@@ -1,0 +1,8 @@
+sw1:
+  device_type: cisco_ios
+  group: spb
+  host: 192.168.1.1
+rtr1:
+  device_type: cisco_ios
+  group: rmt
+  host: 172.16.1.1

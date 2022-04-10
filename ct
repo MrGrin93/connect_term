@@ -1,0 +1,129 @@
+#!/usr/bin/python3
+from pprint import pprint
+from getpass import getpass, getuser
+import requests
+import urllib3
+import pexpect
+import argparse
+import yaml
+from netmiko.ssh_dispatcher import ConnectHandler
+from netmiko.ssh_exception import NetmikoAuthenticationException, NetmikoTimeoutException
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+def creds(group, passw = None):
+    hashicorp_vault = 'your.vault.domain'
+    login = getuser()
+    # print(login)
+    if passw == None:
+        passw = getpass(prompt='Password:')
+    else:
+        passw = passw
+    # print(passw)
+    s = requests.Session()
+    data = {"password": passw}
+    result = s.post(f'https://{hashicorp_vault}:8200/v1/auth/ldap/login/{str(login)}', verify=False, data=data)
+    # print(result.json())
+    token = result.json()['auth']['client_token']
+    vault = requests.Session()
+    head={'X-Vault-Token': token}
+    pswd = vault.get(f'https://{hashicorp_vault}:8200/v1/network_team_kv/data/{group}', verify=False, headers=head)
+    return pswd.json()['data']['data']
+
+def interactive(device):
+    command = f"ssh -oPubkeyAuthentication=no -oStrictHostKeyChecking=no {device['username']}@{device['host']}"
+    ssh = pexpect.spawn(command)
+    ssh.expect('[Pp]assword')
+    ssh.sendline(device['password'])
+    try:
+        ssh.expect('[>]', timeout=1)
+        ssh.sendline('enable')
+        ssh.expect('[Pp]assword')
+        ssh.sendline(device['secret'])
+        ssh.interact()
+    except:
+        ssh.interact()
+
+def send_show_command(device, commands):
+    
+    result = {}
+    try:
+        with ConnectHandler(**device) as ssh:
+            ssh.enable()
+            # hn = ssh.find_prompt()
+            ssh.send_command('terminal more disable')
+            for command in commands:
+                output = ssh.send_command_timing(command)
+                result[command] = output
+            ssh.send_command('terminal more enable')
+            ssh.disconnect()
+        return result
+    except (NetmikoTimeoutException, NetmikoAuthenticationException) as error:
+        print(error)
+
+def save_config(device):
+    
+    try:
+        with ConnectHandler(**device) as ssh:
+            ssh.enable()
+            hn = ssh.find_prompt()
+            hn = hn.strip('#')
+            ssh.send_command('terminal more disable')
+            output = ssh.send_command('sh run', expect_string=fr"{hn}#")
+            # result[command] = output
+            ssh.send_command('terminal more enable')
+            
+            log_file = open(f'/home/Cisco/confs/{hn}', "w")
+            log_file.write(output)
+            ssh.disconnect()
+        return output
+    except (NetmikoTimeoutException, NetmikoAuthenticationException) as error:
+        print(error)
+
+def send_conf_file(device, file):
+    try:
+        with ConnectHandler(**device) as ssh:
+            tftp_ip = '192.168.2.2'
+            ssh.enable()
+            output = ssh.send_command_timing(f'copy tftp://{tftp_ip}/{file} system:/running-config')
+            if "Destination filename" in output:
+                output += ssh.send_command("\n", delay_factor=4, expect_string=r"#")           
+                result = output
+                output += ssh.save_config()
+            ssh.send_command('wr')
+            ssh.disconnect()
+        return result
+    except (NetmikoTimeoutException, NetmikoAuthenticationException) as error:
+        print(error)
+    
+with open('/home/Cisco/cis.yaml') as f:
+    devs = yaml.safe_load(f)
+
+parser = argparse.ArgumentParser()
+parser.add_argument(dest="host", default=None, help='hostname')
+parser.add_argument("-l", dest="loc", action='store_true', help='locac user of cisco device')
+parser.add_argument("-L", dest="int", action='store_true', help="open interactive session with ssh", required=False)
+parser.add_argument("-C", dest="send_show", metavar='command list', nargs='+', default=None, help="send list of commands in '' and sep ','", required=False)
+parser.add_argument("-t", dest="send_conf_file", metavar='file path', default=None, help="send config from file", required=False)
+parser.add_argument("-R", dest="sh_run", action='store_true', help="save sh run in file", required=False)
+args = parser.parse_args()
+
+if args.loc:
+    devs[args.host].update(creds(devs[args.host]['group']))
+    devs[args.host].pop('group')
+else:
+    devs[args.host]['username'] = getuser()
+    devs[args.host]['password'] = getpass(prompt='Password:')
+    devs[args.host]['secret'] = creds(devs[args.host]['group'], devs[args.host]['password'])['secret']
+    devs[args.host].pop('group')
+
+if args.int:
+    interactive(devs[args.host])
+if args.send_show:
+    result = send_show_command(devs[args.host], args.send_show)
+    pprint(result, width=120)
+if args.send_conf_file:
+    send_conf_file(devs[args.host], args.send_conf_file)
+if args.sh_run:
+    save_config(devs[args.host])
+

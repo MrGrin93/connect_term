@@ -1,0 +1,90 @@
+#!/usr/bin/python3
+
+from netmiko import (
+    ConnectHandler,
+    NetmikoTimeoutException,
+    NetmikoAuthenticationException,
+)
+import argparse
+import yaml
+import rsa
+from getpass import getpass, getuser
+import requests
+import urllib3
+import os
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+def loginf():
+    login = getuser()
+    # print(login)
+    if os.path.exists(f'/home/{login}/.pswd'):
+        with open(f'/home/{login}/.priv', mode='rb') as privatefile:
+            keydata = privatefile.read()
+            privkey = rsa.PrivateKey.load_pkcs1(keydata)
+        with open(f'/home/{login}/.pswd', 'rb') as p:
+            encMessage = p.read()
+            passw = rsa.decrypt(encMessage, privkey).decode()
+    else:
+        publicKey, privateKey = rsa.newkeys(512)
+        with open(f'/home/{login}/.priv', 'wb') as p:
+            pk = rsa.PrivateKey.save_pkcs1(privateKey, format='PEM')
+            p.write(pk)
+        passw = getpass(prompt='Password:')
+        encPassw = rsa.encrypt(passw.encode(),publicKey)
+        with open(f'/home/{login}/.pswd', 'wb') as p:
+            p.write(encPassw)
+    crd = {'usr': login,'pswd': passw}
+    # print(crd)
+    return crd
+
+def creds(group):
+    hashicorp_vault = 'vault.local'
+    s = requests.Session()
+    data = {"password": loginf()['pswd']}
+    result = s.post(f'https://{hashicarp_vault}:8200/v1/auth/ldap/login/{str(loginf()["usr"])}', verify=False, data=data)
+    # print(result.json())
+    token = result.json()['auth']['client_token']
+    vault = requests.Session()
+    head={'X-Vault-Token': token}
+    pswd = vault.get(f'https://{hashicarp_vault}:8200/v1/network_team_kv/data/{group}', verify=False, headers=head)
+    return pswd.json()['data']['data']
+
+def send_conf_file(device, file):
+    try:
+        with ConnectHandler(**device) as ssh:
+            tftp_ip = '192.168.2.2'
+            ssh.fast_cli = False
+            ssh.enable()
+            hn = ssh.find_prompt()
+            print(ssh.find_prompt())
+            output = ssh.send_command(f'copy tftp://{tftp_ip}/ACL_SECURITY/{file} running-config', expect_string="Destination filename")
+            print(output)
+            if "Destination filename" in output:
+                output += ssh.send_command("\n", expect_string= rf'{hn}',)
+                print(output)
+            ssh.send_command('wr')
+            ssh.disconnect()
+    except (NetmikoTimeoutException, NetmikoAuthenticationException) as error:
+        print(error)
+
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument(dest="acl", default=None, help='aclname')
+args = parser.parse_args()
+
+with open('/home/ocs/ct_py/cis.yaml') as f:
+    devs = yaml.safe_load(f)
+
+
+with open('/tftp/tftpboot/ACL_SECURITY/acl_devs.yaml') as f:
+    dict_acl = yaml.safe_load(f)
+
+#print(dict_acl[args.acl])
+
+
+for dev in dict_acl[args.acl]:
+    devs[dev].update(creds(devs[dev]['group']))
+    devs[dev].pop('group')
+    send_conf_file(devs[dev], args.acl)
