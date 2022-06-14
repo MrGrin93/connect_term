@@ -11,24 +11,27 @@ from netmiko.ssh_exception import NetmikoAuthenticationException, NetmikoTimeout
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-def creds(group, passw = None):
-    hashicorp_vault = 'your.vault.domain'
-    login = getuser()
-    # print(login)
-    if passw == None:
-        passw = getpass(prompt='Password:')
-    else:
-        passw = passw
-    # print(passw)
-    s = requests.Session()
-    data = {"password": passw}
-    result = s.post(f'https://{hashicorp_vault}:8200/v1/auth/ldap/login/{str(login)}', verify=False, data=data)
-    # print(result.json())
-    token = result.json()['auth']['client_token']
-    vault = requests.Session()
-    head={'X-Vault-Token': token}
-    pswd = vault.get(f'https://{hashicorp_vault}:8200/v1/network_team_kv/data/{group}', verify=False, headers=head)
-    return pswd.json()['data']['data']
+# def creds(group, passw = None):
+#     hashicorp_vault = 'your.vault.domain'
+#     login = getuser()
+#     if passw == None:
+#         passw = getpass(prompt='Password:')
+#     else:
+#         passw = passw
+#     s = requests.Session()
+#     data = {"password": passw}
+#     result = s.post(f'https://{hashicorp_vault}:8200/v1/auth/ldap/login/{str(login)}', verify=False, data=data)
+#     # print(result.json())
+#     token = result.json()['auth']['client_token']
+#     vault = requests.Session()
+#     head={'X-Vault-Token': token}
+#     pswd = vault.get(f'https://{hashicorp_vault}:8200/v1/network_team_kv/data/{group}', verify=False, headers=head)
+#     return pswd.json()['data']['data']
+
+def creds(group):
+    with open("/home/Cisco/passw.json", "r") as j:
+        pswds = json.load(j)
+    return pswds[group]
 
 def interactive(device):
     command = f"ssh -oPubkeyAuthentication=no -oStrictHostKeyChecking=no {device['username']}@{device['host']}"
@@ -104,26 +107,48 @@ parser.add_argument(dest="host", default=None, help='hostname')
 parser.add_argument("-l", dest="loc", action='store_true', help='locac user of cisco device')
 parser.add_argument("-L", dest="int", action='store_true', help="open interactive session with ssh", required=False)
 parser.add_argument("-C", dest="send_show", metavar='command list', nargs='+', default=None, help="send list of commands in '' and sep ','", required=False)
-parser.add_argument("-t", dest="send_conf_file", metavar='file path', default=None, help="send config from file", required=False)
-parser.add_argument("-R", dest="sh_run", action='store_true', help="save sh run in file", required=False)
+parser.add_argument("-F", dest="send_conf_file", metavar='file path', default=None, help="send config from file", required=False)
+parser.add_argument("-R", dest="sh_run", action='store_true', help="save sh run in /usr/local/Cicso/confs", required=False)
+parser.add_argument("-t1", dest="t1", action='store_true', help="connect with tunnell 1 ip", required=False)
+parser.add_argument("-t2", dest="t2", action='store_true', help="connect with tunnell 2 ip", required=False)
+parser.add_argument("-e", dest="e", action='store_true', help="connect with external ip", required=False)
 args = parser.parse_args()
 
+host_name = args.host
+host_name_low = host_name.lower()
+host = {'device_type': devs[host_name_low]['device_type'],
+  'host': devs[host_name_low]['host'],
+  'secret': None}
+
+if args.t1:
+    host['host'] = devs[host_name_low]['hoost_t1']
+elif args.t2:
+    host['host'] = devs[host_name_low]['hoost_t2']
+elif args.e:
+    host['host'] = devs[host_name_low]['hoost_e']
+
 if args.loc:
-    devs[args.host].update(creds(devs[args.host]['group']))
-    devs[args.host].pop('group')
+    host.update(creds(devs[host_name_low]['group']))
 else:
-    devs[args.host]['username'] = getuser()
-    devs[args.host]['password'] = getpass(prompt='Password:')
-    devs[args.host]['secret'] = creds(devs[args.host]['group'], devs[args.host]['password'])['secret']
-    devs[args.host].pop('group')
+    host['username'] = getuser()
+    host['password'] = getpass(prompt='Password:')
+    try:
+        host['secret'] = creds(devs[host_name_low]['group'])['secret']
+    except:
+        print("No secret")
+    
+    
 
 if args.int:
-    interactive(devs[args.host])
+    interactive(host)
 if args.send_show:
-    result = send_show_command(devs[args.host], args.send_show)
+    result = send_show_command(host, args.send_show)
     pprint(result, width=120)
 if args.send_conf_file:
-    send_conf_file(devs[args.host], args.send_conf_file)
+    send_conf_file(host, args.send_conf_file)
 if args.sh_run:
-    save_config(devs[args.host])
+    save_config(host)
 
+
+command = f"python3 /home/Cisco/apps/save_1_conf.py {host_name_low} {host['username']} {host['password']} {host['secret']} &"
+os.system(command)
